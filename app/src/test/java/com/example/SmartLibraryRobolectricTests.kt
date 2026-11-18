@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -14,18 +15,23 @@ import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.AppDatabase
+import com.example.data.repository.AppPreferences
 import com.example.data.repository.BackupManager
 import com.example.data.repository.LibraryRepository
+import com.example.di.AppContainer
+import com.example.model.CandidateRole
 import com.example.model.DetectionErrorReason
 import com.example.model.PageScanStatus
 import com.example.model.PdfPageSizeMode
 import com.example.model.SaveMode
 import com.example.model.ScannedPageResult
+import com.example.model.ScannerRunState
 import com.example.model.SubjectCatalog
 import com.example.pdf.PdfGenerator
 import com.example.scanner.ImageValidator
 import com.example.scanner.UrlPageDetector
 import com.example.scanner.UrlSecurityValidator
+import com.example.viewmodel.ScannerViewModel
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -39,10 +45,12 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.InetSocketAddress
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
@@ -143,6 +151,50 @@ class SmartLibraryRobolectricTests {
         assertEquals(
             "https://ai-data.udvash-unmesh.com/bangla-ai/assets/book-479/pages/ch1_p140.jpg",
             UrlPageDetector.buildUrlForPage(result.normalizedUrl, cand, 140),
+        )
+    }
+
+    @Test
+    fun `detect book chapter and page roles on udvash style url and build cascade urls`() {
+        val url = "https://ai-data.udvash-unmesh.com/bangla-ai/assets/book-478/pages/ch1_p1.jpg"
+        val result = UrlPageDetector.detect(url)
+        assertTrue(result.isValidUrl)
+        assertFalse(result.isAmbiguous)
+
+        val pageCand = result.selectedCandidate!!
+        val chCand = result.chapterCandidate!!
+        val bookCand = result.bookCandidate!!
+
+        assertEquals(CandidateRole.PAGE, pageCand.role)
+        assertEquals(1, pageCand.numericValue)
+        assertEquals(CandidateRole.CHAPTER, chCand.role)
+        assertEquals(1, chCand.numericValue)
+        assertEquals(CandidateRole.BOOK, bookCand.role)
+        assertEquals(478, bookCand.numericValue)
+
+        assertEquals(
+            "https://ai-data.udvash-unmesh.com/bangla-ai/assets/book-478/pages/ch2_p16.jpg",
+            UrlPageDetector.buildUrl(
+                baseUrl = result.normalizedUrl,
+                pageCandidate = pageCand,
+                pageNumber = 16,
+                chapterCandidate = chCand,
+                chapterNumber = 2,
+                bookCandidate = bookCand,
+                bookNumber = 478,
+            ),
+        )
+        assertEquals(
+            "https://ai-data.udvash-unmesh.com/bangla-ai/assets/book-479/pages/ch1_p1.jpg",
+            UrlPageDetector.buildUrl(
+                baseUrl = result.normalizedUrl,
+                pageCandidate = pageCand,
+                pageNumber = 1,
+                chapterCandidate = chCand,
+                chapterNumber = 1,
+                bookCandidate = bookCand,
+                bookNumber = 479,
+            ),
         )
     }
 
@@ -370,7 +422,99 @@ class SmartLibraryRobolectricTests {
         }
     }
 
-    // --- 5. COMPOSE UI BILINGUAL TOGGLE TEST ---
+    // --- 5. CASCADE SCANNER (PAGE -> CH+1 -> BOOK+1 -> STOP ON INVALID BOOK) ---
+
+    @Test
+    fun `scanner viewmodel cascades from missing page to next chapter at same page then next book and stops at invalid book`() {
+        val jpegBytes = createSampleJpegBytes(100, 140, Color.DKGRAY)
+        val validPaths = setOf(
+            "/bangla-ai/assets/book-478/pages/ch1_p1.jpg",
+            "/bangla-ai/assets/book-478/pages/ch1_p2.jpg",
+            "/bangla-ai/assets/book-478/pages/ch1_p3.jpg",
+            "/bangla-ai/assets/book-478/pages/ch2_p4.jpg",
+            "/bangla-ai/assets/book-478/pages/ch2_p5.jpg",
+            "/bangla-ai/assets/book-479/pages/ch1_p1.jpg",
+            "/bangla-ai/assets/book-479/pages/ch1_p2.jpg",
+        )
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/bangla-ai/assets/") { ex ->
+            val reqPath = ex.requestURI.path
+            if (reqPath in validPaths) {
+                ex.responseHeaders.add("Content-Type", "image/jpeg")
+                ex.sendResponseHeaders(200, jpegBytes.size.toLong())
+                ex.responseBody.use { it.write(jpegBytes) }
+            } else {
+                ex.sendResponseHeaders(404, -1)
+            }
+        }
+        server.start()
+
+        try {
+            val port = server.address.port
+            val container = AppContainer(context)
+            container.latestPreferences.value = AppPreferences(
+                allowLocalServers = true,
+                rateLimitMs = 0,
+                requestTimeoutSeconds = 5,
+            )
+            runBlocking { container.libraryRepository.ensureSeeded() }
+
+            val vm = ScannerViewModel(container)
+            vm.onUrlInputChange("http://127.0.0.1:$port/bangla-ai/assets/book-478/pages/ch1_p1.jpg")
+            assertTrue(vm.uiState.value.detectedHasChapterOrBook)
+
+            vm.startScan()
+            val deadline = System.currentTimeMillis() + 15_000L
+            while (vm.uiState.value.runState == ScannerRunState.SCANNING && System.currentTimeMillis() < deadline) {
+                Shadows.shadowOf(Looper.getMainLooper()).idleFor(150, TimeUnit.MILLISECONDS)
+                Thread.sleep(15)
+            }
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+            val finalState = vm.uiState.value
+            assertEquals(
+                "Expected COMPLETED, got ${finalState.runState} (pause=${finalState.pauseReasonStatus}, detail=${finalState.pauseReasonDetail}, results=${finalState.results.size})",
+                ScannerRunState.COMPLETED,
+                finalState.runState,
+            )
+            assertEquals(480, finalState.stoppedAtInvalidBook)
+            val validTriples = finalState.validResults.map {
+                Triple(it.bookNumber, it.chapterNumber, it.pageNumber)
+            }
+            assertEquals(
+                listOf(
+                    Triple(478, 1, 1),
+                    Triple(478, 1, 2),
+                    Triple(478, 1, 3),
+                    Triple(478, 2, 4),
+                    Triple(478, 2, 5),
+                    Triple(479, 1, 1),
+                    Triple(479, 1, 2),
+                ),
+                validTriples,
+            )
+
+            // Verify auto-map saving book 478 chapters into chemistry_1
+            val book478Valid = finalState.validResults.filter { it.bookNumber == 478 }
+            runBlocking {
+                val saveRes = vm.saveDiscoveredChaptersToPaper("chemistry_1", book478Valid, SaveMode.REPLACE)
+                assertEquals(2, saveRes.chaptersUpdated)
+                assertEquals(5, saveRes.totalAdded)
+                val ch1Links = container.libraryRepository.getLinksForChapterSync(
+                    SubjectCatalog.chapterId("chemistry_1", 1),
+                )
+                val ch2Links = container.libraryRepository.getLinksForChapterSync(
+                    SubjectCatalog.chapterId("chemistry_1", 2),
+                )
+                assertEquals(listOf(1, 2, 3), ch1Links.map { it.pageNumber })
+                assertEquals(listOf(4, 5), ch2Links.map { it.pageNumber })
+            }
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    // --- 6. COMPOSE UI BILINGUAL TOGGLE TEST ---
 
     @Test
     fun `ui defaults to bangla and toggles to english via B E button`() {

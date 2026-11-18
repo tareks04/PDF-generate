@@ -430,10 +430,37 @@ fun SelectSubjectChapterModal(
     chaptersWithStats: List<ChapterWithStats>,
     strings: AppStrings,
     onRenameChapter: (chapterId: String, newTitle: String?) -> Unit,
-    onSave: (chapterId: String, mode: SaveMode) -> Unit,
+    onSaveSingleChapter: (chapterId: String, pagesToSave: List<ScannedPageResult>, mode: SaveMode) -> Unit,
+    onSaveAutoMappedPaper: (paperId: String, pagesToSave: List<ScannedPageResult>, mode: SaveMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
     if (validPages.isEmpty()) return
+
+    val discoveredGroups = remember(validPages) {
+        validPages
+            .groupBy { it.bookNumber to it.chapterNumber }
+            .entries
+            .sortedWith(compareBy({ it.key.first ?: 0 }, { it.key.second ?: 0 }))
+    }
+    val hasMultipleChapters = remember(discoveredGroups) {
+        discoveredGroups.count { it.key.second != null } > 1
+    }
+
+    // Group filter: null = All pages, Pair(book, ch) = specific discovered group
+    var selectedSourceGroup by remember(validPages) {
+        mutableStateOf<Pair<Int?, Int?>?>(null)
+    }
+    var autoMapAllChapters by remember(hasMultipleChapters) {
+        mutableStateOf(hasMultipleChapters)
+    }
+
+    val pagesForSave = remember(validPages, selectedSourceGroup, autoMapAllChapters) {
+        if (autoMapAllChapters || selectedSourceGroup == null) {
+            validPages
+        } else {
+            validPages.filter { (it.bookNumber to it.chapterNumber) == selectedSourceGroup }
+        }
+    }
 
     var selectedGroup by remember { mutableStateOf(SubjectGroup.PHYSICS) }
     val papersInGroup = remember(selectedGroup) { SubjectCatalog.papersForGroup(selectedGroup) }
@@ -455,9 +482,9 @@ fun SelectSubjectChapterModal(
     val selectedChapterTriple = chaptersInPaper.find { it.second == selectedChapterNumber }
         ?: chaptersInPaper.first()
 
-    val sortedPages = remember(validPages) { validPages.sortedBy { it.pageNumber } }
-    val firstPage = sortedPages.first().formattedPageNumber
-    val lastPage = sortedPages.last().formattedPageNumber
+    val sortedPages = remember(pagesForSave) { pagesForSave.sortedBy { it.pageNumber } }
+    val firstPage = sortedPages.firstOrNull()?.formattedPageNumber ?: "—"
+    val lastPage = sortedPages.lastOrNull()?.formattedPageNumber ?: "—"
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -466,7 +493,7 @@ fun SelectSubjectChapterModal(
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .heightIn(max = 760.dp),
+                .heightIn(max = 780.dp),
             shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
@@ -496,6 +523,43 @@ fun SelectSubjectChapterModal(
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
+                    // 0. If multiple chapters/books discovered, offer Auto-Map or specific source selection
+                    if (hasMultipleChapters) {
+                        val distinctChCount = discoveredGroups.mapNotNull { it.key.second }.distinct().size
+                        SaveModeOptionRow(
+                            selected = autoMapAllChapters,
+                            title = strings.autoMapChaptersOptionTitle,
+                            desc = strings.autoMapChaptersOptionDesc(distinctChCount),
+                            onClick = { autoMapAllChapters = !autoMapAllChapters },
+                            testTag = "save_auto_map_chapters",
+                        )
+
+                        if (!autoMapAllChapters) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                FilterChip(
+                                    selected = selectedSourceGroup == null,
+                                    onClick = { selectedSourceGroup = null },
+                                    label = { Text("${strings.filterAllChapters} (${validPages.size})") },
+                                )
+                                discoveredGroups.forEach { (key, groupPages) ->
+                                    val label = buildString {
+                                        key.first?.let { append("${strings.currentBookLabel} $it • ") }
+                                        key.second?.let { append("${strings.currentChapterLabel} $it ") }
+                                        append("(${groupPages.size})")
+                                    }
+                                    FilterChip(
+                                        selected = selectedSourceGroup == key,
+                                        onClick = { selectedSourceGroup = key },
+                                        label = { Text(label) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // 1. Subject group selector
                     Text(strings.selectSubjectLabel, style = MaterialTheme.typography.titleSmall)
                     FlowRow(
@@ -535,32 +599,34 @@ fun SelectSubjectChapterModal(
                         }
                     }
 
-                    // 3. Dynamic chapter selector
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(strings.selectChapterLabel, style = MaterialTheme.typography.titleSmall)
-                        TextButton(
-                            onClick = { renameDialogChapter = selectedChapterTriple },
+                    // 3. Dynamic chapter selector (hidden when Auto-Mapping all discovered chapters)
+                    if (!autoMapAllChapters) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text(strings.renameChapterTitle)
+                            Text(strings.selectChapterLabel, style = MaterialTheme.typography.titleSmall)
+                            TextButton(
+                                onClick = { renameDialogChapter = selectedChapterTriple },
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(strings.renameChapterTitle)
+                            }
                         }
-                    }
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        chaptersInPaper.forEach { (chId, chNum, chTitle) ->
-                            FilterChip(
-                                selected = selectedChapterNumber == chNum,
-                                onClick = { selectedChapterNumber = chNum },
-                                label = { Text(chTitle) },
-                                modifier = Modifier.testTag("modal_chapter_$chId"),
-                            )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            chaptersInPaper.forEach { (chId, chNum, chTitle) ->
+                                FilterChip(
+                                    selected = selectedChapterNumber == chNum,
+                                    onClick = { selectedChapterNumber = chNum },
+                                    label = { Text(chTitle) },
+                                    modifier = Modifier.testTag("modal_chapter_$chId"),
+                                )
+                            }
                         }
                     }
 
@@ -576,7 +642,11 @@ fun SelectSubjectChapterModal(
                         ) {
                             Text(strings.selectedSummaryTitle, style = MaterialTheme.typography.titleSmall)
                             Text(
-                                text = "${selectedPaper.title(strings.isBangla)} — ${selectedChapterTriple.third}",
+                                text = if (autoMapAllChapters) {
+                                    "${selectedPaper.title(strings.isBangla)} (${strings.autoMapChaptersOptionTitle})"
+                                } else {
+                                    "${selectedPaper.title(strings.isBangla)} — ${selectedChapterTriple.third}"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary,
@@ -585,7 +655,7 @@ fun SelectSubjectChapterModal(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
-                                Text("${strings.totalValidLinksLabel}: ${strings.formatNum(validPages.size)}", style = MaterialTheme.typography.bodySmall)
+                                Text("${strings.totalValidLinksLabel}: ${strings.formatNum(pagesForSave.size)}", style = MaterialTheme.typography.bodySmall)
                                 Text("${strings.firstPageLabel}: $firstPage  |  ${strings.lastPageLabel}: $lastPage", style = MaterialTheme.typography.bodySmall)
                             }
                         }
@@ -627,7 +697,14 @@ fun SelectSubjectChapterModal(
                     }
                     Spacer(Modifier.width(8.dp))
                     Button(
-                        onClick = { onSave(selectedChapterTriple.first, saveMode) },
+                        onClick = {
+                            if (autoMapAllChapters && hasMultipleChapters) {
+                                onSaveAutoMappedPaper(selectedPaper.id, pagesForSave, saveMode)
+                            } else {
+                                onSaveSingleChapter(selectedChapterTriple.first, pagesForSave, saveMode)
+                            }
+                        },
+                        enabled = pagesForSave.isNotEmpty(),
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
                             .testTag("modal_confirm_save_button"),

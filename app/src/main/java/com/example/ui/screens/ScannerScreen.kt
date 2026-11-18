@@ -45,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -174,6 +175,44 @@ fun ScannerScreen(
                                     .weight(1f)
                                     .testTag("scanner_start_page_input"),
                             )
+                        }
+
+                        // Auto-Advance Chapter & Book toggle
+                        AnimatedVisibility(visible = uiState.detectedHasChapterOrBook) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = strings.autoAdvanceTitle,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            text = strings.autoAdvanceDesc,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Switch(
+                                        checked = uiState.autoAdvanceHierarchy,
+                                        onCheckedChange = viewModel::onAutoAdvanceChange,
+                                        enabled = !isScanning,
+                                        modifier = Modifier.testTag("scanner_auto_advance_switch"),
+                                    )
+                                }
+                            }
                         }
 
                         // Detection Error
@@ -332,8 +371,44 @@ fun ScannerScreen(
                                 StatPill(strings.totalTested, strings.formatNum(uiState.totalTested))
                                 StatPill(strings.validPages, strings.formatNum(uiState.validCount))
                                 StatPill(strings.missingPages, strings.formatNum(uiState.missingCount))
+                                uiState.currentBookNumber?.let { b ->
+                                    StatPill(strings.currentBookLabel, strings.formatNum(b))
+                                }
+                                uiState.currentChapterNumber?.let { ch ->
+                                    StatPill(strings.currentChapterLabel, strings.formatNum(ch))
+                                }
                                 uiState.currentPageNumber?.let { cur ->
                                     StatPill(strings.currentPageLabel, strings.formatNum(cur))
+                                }
+                            }
+
+                            uiState.stoppedAtInvalidBook?.let { invalidBook ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        text = strings.stoppedAtInvalidBook(invalidBook),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.padding(12.dp),
+                                    )
+                                }
+                            } ?: uiState.stoppedAtInvalidChapter?.let { invalidCh ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        text = strings.stoppedAtInvalidChapter(invalidCh),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.padding(12.dp),
+                                    )
                                 }
                             }
 
@@ -507,7 +582,7 @@ fun ScannerScreen(
                     }
                 }
 
-                items(uiState.results, key = { "${it.pageNumber}_${it.url}" }) { item ->
+                items(uiState.results, key = { "${it.bookNumber}_${it.chapterNumber}_${it.pageNumber}_${it.url}" }) { item ->
                     Card(
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -519,12 +594,24 @@ fun ScannerScreen(
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(
-                                text = item.formattedPageNumber,
-                                style = MaterialTheme.typography.labelLarge.copy(fontFamily = MonoFontFamily),
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.width(56.dp),
-                            )
+                            Column(modifier = Modifier.width(68.dp)) {
+                                Text(
+                                    text = item.formattedPageNumber,
+                                    style = MaterialTheme.typography.labelLarge.copy(fontFamily = MonoFontFamily),
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                if (item.bookNumber != null || item.chapterNumber != null) {
+                                    val tag = buildString {
+                                        item.bookNumber?.let { append("B$it ") }
+                                        item.chapterNumber?.let { append("C$it") }
+                                    }.trim()
+                                    Text(
+                                        text = tag,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFontFamily),
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = item.url.substringAfterLast('/').ifEmpty { item.url },
@@ -592,14 +679,23 @@ fun ScannerScreen(
             chaptersWithStats = chaptersWithStats,
             strings = strings,
             onRenameChapter = onRenameChapter,
-            onSave = { chapterId, mode ->
+            onSaveSingleChapter = { chapterId, pagesToSave, mode ->
                 scope.launch {
-                    val result = viewModel.saveValidLinksToChapter(chapterId, mode)
+                    val result = viewModel.saveValidLinksToChapter(chapterId, pagesToSave, mode)
                     val msg = when (mode) {
                         SaveMode.MERGE -> strings.saveSuccessMerge(result.addedCount, result.duplicateCount)
                         SaveMode.REPLACE -> strings.saveSuccessReplace(result.addedCount)
                     }
                     viewModel.setSaveBanner(msg)
+                    showSaveModal = false
+                }
+            },
+            onSaveAutoMappedPaper = { paperId, pagesToSave, mode ->
+                scope.launch {
+                    val res = viewModel.saveDiscoveredChaptersToPaper(paperId, pagesToSave, mode)
+                    viewModel.setSaveBanner(
+                        strings.saveSuccessAutoMap(res.chaptersUpdated, res.totalAdded, res.totalDuplicates)
+                    )
                     showSaveModal = false
                 }
             },

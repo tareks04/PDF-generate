@@ -1,5 +1,6 @@
 package com.example.scanner
 
+import com.example.model.CandidateRole
 import com.example.model.DetectionErrorReason
 import com.example.model.PageNumberCandidate
 import com.example.model.UrlDetectionResult
@@ -10,6 +11,13 @@ object UrlPageDetector {
     private val numberRegex = Regex("""\d+""")
     private val imageExtRegex = Regex("""\.(jpe?g|png|webp|gif)$""", RegexOption.IGNORE_CASE)
     private val pageParamNames = setOf("page", "pg", "p", "page_no", "pageno", "pagenum", "page_number")
+    private val chapterParamNames = setOf("ch", "chap", "chapter", "chapter_no", "chapterno")
+    private val bookParamNames = setOf("book", "book_id", "bookid", "bk", "vol")
+
+    private val explicitPagePrefixRegex = Regex("""(?:^|[^a-z])(page|pg|p)[-_]?$""")
+    private val explicitChapterPrefixRegex = Regex("""(?:^|[^a-z])(ch|chap|chapter)[-_]?$""")
+    private val explicitBookPrefixRegex = Regex("""(?:^|[^a-z])(book|bk|vol)[-_]?$""")
+    private val otherNonPagePrefixRegex = Regex("""(?:^|[^a-z])(part|unit|sec|id)[-_]?$""")
 
     fun detect(rawInput: String, allowLocalServers: Boolean = false): UrlDetectionResult {
         val trimmed = rawInput.trim()
@@ -48,18 +56,26 @@ object UrlPageDetector {
         val isAmbiguous = if (second == null) {
             false
         } else {
-            // Ambiguous if two candidates are in the same high-priority context or close in score
-            // (e.g., two numbers inside filename like ch02_005.jpg, or two non-page query params)
             top.score - second.score <= 15 && top.score < 95
         }
+
+        val chosenPage = if (isAmbiguous) null else top
+        val chapterCand = candidates
+            .filter { it.role == CandidateRole.CHAPTER && it.id != chosenPage?.id }
+            .maxByOrNull { it.startIndex }
+        val bookCand = candidates
+            .filter { it.role == CandidateRole.BOOK && it.id != chosenPage?.id && it.id != chapterCand?.id }
+            .maxByOrNull { it.startIndex }
 
         return UrlDetectionResult(
             isValidUrl = true,
             normalizedUrl = trimmed,
             candidates = sorted,
-            selectedCandidate = if (isAmbiguous) null else top,
+            selectedCandidate = chosenPage,
             isAmbiguous = isAmbiguous,
             errorReason = null,
+            chapterCandidate = chapterCand,
+            bookCandidate = bookCand,
         )
     }
 
@@ -74,6 +90,33 @@ object UrlPageDetector {
             append(formatted)
             append(baseUrl.substring(candidate.endIndex))
         }
+    }
+
+    fun buildUrl(
+        baseUrl: String,
+        pageCandidate: PageNumberCandidate,
+        pageNumber: Int,
+        chapterCandidate: PageNumberCandidate? = null,
+        chapterNumber: Int? = null,
+        bookCandidate: PageNumberCandidate? = null,
+        bookNumber: Int? = null,
+    ): String {
+        val replacements = buildList {
+            add(pageCandidate to formatPageNumber(pageNumber, pageCandidate.padWidth))
+            if (chapterCandidate != null && chapterNumber != null) {
+                add(chapterCandidate to formatPageNumber(chapterNumber, chapterCandidate.padWidth))
+            }
+            if (bookCandidate != null && bookNumber != null) {
+                add(bookCandidate to formatPageNumber(bookNumber, bookCandidate.padWidth))
+            }
+        }.distinctBy { it.first.startIndex }
+            .sortedByDescending { it.first.startIndex }
+
+        var result = baseUrl
+        for ((cand, replacement) in replacements) {
+            result = result.substring(0, cand.startIndex) + replacement + result.substring(cand.endIndex)
+        }
+        return result
     }
 
     fun formatPageNumber(pageNumber: Int, padWidth: Int): String {
@@ -98,7 +141,6 @@ object UrlPageDetector {
             val path = url.substring(pathStart, pathEnd)
             val segments = path.split('/')
             var cursor = pathStart
-            // Identify the last non-empty segment index
             val lastNonEmptyIdx = segments.indexOfLast { it.isNotEmpty() }
 
             segments.forEachIndexed { idx, segment ->
@@ -108,6 +150,7 @@ object UrlPageDetector {
                     val stemEnd = extMatch?.range?.first ?: segment.length
                     val stem = segment.substring(0, stemEnd)
                     val matchesInStem = numberRegex.findAll(stem).toList()
+                    val prevSegLower = if (idx > 0) segments[idx - 1].lowercase() else ""
 
                     matchesInStem.forEachIndexed { matchIdx, match ->
                         val rawDigits = match.value
@@ -117,33 +160,35 @@ object UrlPageDetector {
                         val padWidth = if (rawDigits.length > 1 && rawDigits.startsWith('0')) rawDigits.length else 1
 
                         val prefixLower = stem.substring(0, match.range.first).lowercase()
-                        val hasExplicitPagePrefix =
-                            Regex("""(?:^|[^a-z])(page|pg|p)[-_]?$""").containsMatchIn(prefixLower)
+                        val hasExplicitPagePrefix = explicitPagePrefixRegex.containsMatchIn(prefixLower)
+                        val hasChapterPrefix = explicitChapterPrefixRegex.containsMatchIn(prefixLower) ||
+                            (stem == rawDigits && prevSegLower in setOf("ch", "chap", "chapter"))
+                        val hasBookPrefix = explicitBookPrefixRegex.containsMatchIn(prefixLower) ||
+                            (stem == rawDigits && prevSegLower in setOf("book", "books", "vol"))
+                        val hasOtherPrefix = otherNonPagePrefixRegex.containsMatchIn(prefixLower)
 
-                        val hasChapterPrefix =
-                            Regex("""(?:^|[^a-z])(ch|chap|chapter|book|vol|part|unit|sec|id)[-_]?$""")
-                                .containsMatchIn(prefixLower)
-
-                        val prevSegLower = if (idx > 0) segments[idx - 1].lowercase() else ""
                         val parentIsPageHint = prevSegLower in setOf("page", "pages", "image", "images", "img", "scan")
+
+                        val role = when {
+                            hasExplicitPagePrefix -> CandidateRole.PAGE
+                            hasChapterPrefix -> CandidateRole.CHAPTER
+                            hasBookPrefix -> CandidateRole.BOOK
+                            else -> CandidateRole.PAGE
+                        }
 
                         val score = when {
                             isLastSegment && hasExplicitPagePrefix -> 98
                             isLastSegment && stem == rawDigits && extMatch != null -> 90
                             isLastSegment && parentIsPageHint && stem == rawDigits -> 88
-                            isLastSegment && hasChapterPrefix -> 40
+                            isLastSegment && (hasChapterPrefix || hasBookPrefix || hasOtherPrefix) -> 40
                             isLastSegment && matchesInStem.size == 1 -> 72
                             isLastSegment -> {
-                                // Multiple numbers in the final filename (e.g., ch02_005.jpg or 12_34.jpg)
-                                // Give trailing number slight preference if not explicitly prefixed,
-                                // but keep scores within ambiguity threshold (<= 15) when uncertain
                                 if (matchIdx == matchesInStem.lastIndex) 70 else 62
                             }
                             hasExplicitPagePrefix -> 60
                             else -> 25
                         }
 
-                        val contextLabel = "/$segment"
                         candidates.add(
                             PageNumberCandidate(
                                 id = "path_${absStart}_${absEnd}",
@@ -152,13 +197,14 @@ object UrlPageDetector {
                                 padWidth = padWidth,
                                 startIndex = absStart,
                                 endIndex = absEnd,
-                                contextLabel = contextLabel,
+                                contextLabel = "/$segment",
                                 score = score,
+                                role = role,
                             )
                         )
                     }
                 }
-                cursor += segment.length + 1 // +1 for '/'
+                cursor += segment.length + 1
             }
         }
 
@@ -181,10 +227,17 @@ object UrlPageDetector {
                         val absEnd = cursor + eqIdx + 1 + match.range.last + 1
                         val padWidth = if (rawDigits.length > 1 && rawDigits.startsWith('0')) rawDigits.length else 1
 
+                        val role = when (keyLower) {
+                            in chapterParamNames -> CandidateRole.CHAPTER
+                            in bookParamNames -> CandidateRole.BOOK
+                            else -> CandidateRole.PAGE
+                        }
+
                         val score = when {
                             keyLower in pageParamNames && valuePart == rawDigits -> 100
                             keyLower in pageParamNames -> 92
-                            keyLower in setOf("book", "bookid", "book_id", "chapter", "ch", "cid", "bid", "id", "v", "ver") -> 25
+                            keyLower in chapterParamNames || keyLower in bookParamNames ||
+                                keyLower in setOf("cid", "bid", "id", "v", "ver") -> 25
                             else -> 68
                         }
 
@@ -198,11 +251,12 @@ object UrlPageDetector {
                                 endIndex = absEnd,
                                 contextLabel = "?$key=$valuePart",
                                 score = score,
+                                role = role,
                             )
                         )
                     }
                 }
-                cursor += pair.length + 1 // +1 for '&'
+                cursor += pair.length + 1
             }
         }
 

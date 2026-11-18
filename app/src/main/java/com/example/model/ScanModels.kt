@@ -19,6 +19,12 @@ enum class ScannerRunState {
     STOPPED,
 }
 
+enum class CandidateRole {
+    PAGE,
+    CHAPTER,
+    BOOK,
+}
+
 data class PageNumberCandidate(
     val id: String,
     val rawDigits: String,
@@ -28,6 +34,7 @@ data class PageNumberCandidate(
     val endIndex: Int,
     val contextLabel: String,
     val score: Int,
+    val role: CandidateRole = CandidateRole.PAGE,
 )
 
 data class UrlDetectionResult(
@@ -37,6 +44,8 @@ data class UrlDetectionResult(
     val selectedCandidate: PageNumberCandidate?,
     val isAmbiguous: Boolean,
     val errorReason: DetectionErrorReason? = null,
+    val chapterCandidate: PageNumberCandidate? = null,
+    val bookCandidate: PageNumberCandidate? = null,
 )
 
 enum class DetectionErrorReason {
@@ -57,6 +66,8 @@ data class ScannedPageResult(
     val width: Int = 0,
     val height: Int = 0,
     val byteSize: Long = 0L,
+    val bookNumber: Int? = null,
+    val chapterNumber: Int? = null,
 )
 
 enum class SaveMode {
