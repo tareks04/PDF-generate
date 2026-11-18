@@ -1,0 +1,6 @@
+{
+  "name": "Smart Page Library",
+  "description": "Smart Page Link Scanner & Chapter-wise PDF Library for Physics, Chemistry, and Biology study pages with Bangla/English UI, local Room persistence, JSON backup/restore, and printable PDF generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
