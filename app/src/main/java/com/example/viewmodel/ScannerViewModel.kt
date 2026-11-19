@@ -92,11 +92,11 @@ class ScannerViewModel(
         } else {
             null
         }
-        val hasHierarchy = quickDetect?.chapterCandidate != null || quickDetect?.bookCandidate != null
+        val hasChapter = quickDetect?.chapterCandidate != null
         _uiState.update {
             it.copy(
                 urlInput = value,
-                detectedHasChapterOrBook = hasHierarchy,
+                detectedHasChapterOrBook = hasChapter,
                 detectionError = null,
                 ambiguousCandidates = emptyList(),
                 selectedCandidate = null,
@@ -202,7 +202,7 @@ class ScannerViewModel(
                 selectedCandidate = candidate,
                 ambiguousCandidates = emptyList(),
                 detectionError = null,
-                detectedHasChapterOrBook = chapterCand != null || bookCand != null,
+                detectedHasChapterOrBook = chapterCand != null,
             )
         }
         launchFreshScan(currentUrl, candidate, chapterCand, bookCand)
@@ -219,7 +219,7 @@ class ScannerViewModel(
 
         val state = _uiState.value
         val prefs = container.latestPreferences.value
-        val isCascade = state.autoAdvanceHierarchy && (chapterCandidate != null || bookCandidate != null)
+        val isCascade = state.autoAdvanceHierarchy && chapterCandidate != null
         val maxPages = state.maxPagesInput.toIntOrNull()?.coerceIn(1, 5000)
             ?: if (isCascade) 2000 else prefs.defaultMaxPages
         val startPage = state.startPageOverrideInput.toIntOrNull()?.coerceAtLeast(0)
@@ -241,7 +241,7 @@ class ScannerViewModel(
             it.copy(
                 runState = ScannerRunState.SCANNING,
                 results = emptyList(),
-                detectedHasChapterOrBook = chapterCandidate != null || bookCandidate != null,
+                detectedHasChapterOrBook = chapterCandidate != null,
                 currentBookNumber = nextBookToScan,
                 currentChapterNumber = nextChapterToScan,
                 currentPageNumber = startPage,
@@ -465,8 +465,8 @@ class ScannerViewModel(
                 val cascadeEnabled = _uiState.value.autoAdvanceHierarchy
 
                 if (outcome.status == PageScanStatus.MISSING) {
-                    if (!cascadeEnabled || (chapterCandidate == null && bookCandidate == null)) {
-                        // Single-chapter mode: stop on first confirmed missing page
+                    if (!cascadeEnabled || chapterCandidate == null) {
+                        // Single-chapter mode (or no chapter token): stop on first confirmed missing page
                         _uiState.update {
                             it.copy(
                                 runState = ScannerRunState.COMPLETED,
@@ -476,40 +476,23 @@ class ScannerViewModel(
                         return@launch
                     }
 
-                    // Cascade Mode:
-                    // 1) If we were scanning pages inside a chapter, roll ch -> ch + 1 starting at the SAME missing page
-                    if (chapterCandidate != null && !justRolledChapter && !justRolledBook) {
+                    // Chapter Auto-Advance Mode (stays strictly within the selected book):
+                    // 1) Roll ch -> ch + 1 starting at the SAME missing page
+                    if (!justRolledChapter) {
                         nextChapterToScan = (chNum ?: 1) + 1
                         // Keep nextPageToScan unchanged (the missing page number!)
                         justRolledChapter = true
-                        justRolledBook = false
                         remainingQuota--
                         if (rateDelay > 0) delay(rateDelay)
                         continue
                     }
 
-                    // 2) If ch+1 was also missing on that page (justRolledChapter == true), OR no chapter token exists:
-                    //    roll book -> book + 1, reset ch = 1, p = 1
-                    if (bookCandidate != null && !justRolledBook) {
-                        nextBookToScan = (bookNum ?: 1) + 1
-                        if (chapterCandidate != null) {
-                            nextChapterToScan = 1
-                        }
-                        nextPageToScan = 1
-                        justRolledBook = true
-                        justRolledChapter = false
-                        remainingQuota--
-                        if (rateDelay > 0) delay(rateDelay)
-                        continue
-                    }
-
-                    // 3) If justRolledBook == true and book+1 failed on ch1_p1 -> invalid book confirmed! Stop cleanly.
+                    // 2) ch+1 was also missing on that page -> current book ended! Stop cleanly without book+1.
                     _uiState.update {
                         it.copy(
                             runState = ScannerRunState.COMPLETED,
                             currentPageNumber = null,
-                            stoppedAtInvalidBook = if (bookCandidate != null) bookNum else null,
-                            stoppedAtInvalidChapter = if (bookCandidate == null) chNum else null,
+                            stoppedAtInvalidChapter = chNum,
                         )
                     }
                     return@launch

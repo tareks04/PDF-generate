@@ -10,6 +10,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.i18n.AppLanguage
 import com.example.i18n.ThemePreference
+import com.example.model.SubjectCatalog
+import com.example.model.SubjectGroup
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -23,6 +25,8 @@ data class AppPreferences(
     val defaultMaxPages: Int = 200,
     val relayEndpointUrl: String = "",
     val allowLocalServers: Boolean = false,
+    val selectedLibraryGroupId: String = SubjectGroup.PHYSICS.id,
+    val selectedLibraryPaperId: String = SubjectCatalog.papers.first().id,
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -34,9 +38,17 @@ class PreferencesRepository(private val context: Context) {
         val DEFAULT_MAX_PAGES = intPreferencesKey("default_max_pages")
         val RELAY_URL = stringPreferencesKey("relay_endpoint_url")
         val ALLOW_LOCAL = booleanPreferencesKey("allow_local_servers")
+        val LIBRARY_GROUP_ID = stringPreferencesKey("library_group_id")
+        val LIBRARY_PAPER_ID = stringPreferencesKey("library_paper_id")
     }
 
     val preferences: Flow<AppPreferences> = context.dataStore.data.map { prefs ->
+        val rawGroupId = prefs[Keys.LIBRARY_GROUP_ID]
+        val group = SubjectGroup.entries.find { it.id == rawGroupId } ?: SubjectGroup.PHYSICS
+        val papersInGroup = SubjectCatalog.papersForGroup(group)
+        val rawPaperId = prefs[Keys.LIBRARY_PAPER_ID]
+        val validPaperId = papersInGroup.find { it.id == rawPaperId }?.id ?: papersInGroup.first().id
+
         AppPreferences(
             language = prefs[Keys.LANGUAGE]?.let {
                 runCatching { AppLanguage.valueOf(it) }.getOrNull()
@@ -49,6 +61,8 @@ class PreferencesRepository(private val context: Context) {
             defaultMaxPages = (prefs[Keys.DEFAULT_MAX_PAGES] ?: 200).coerceIn(1, 2000),
             relayEndpointUrl = prefs[Keys.RELAY_URL] ?: "",
             allowLocalServers = prefs[Keys.ALLOW_LOCAL] ?: false,
+            selectedLibraryGroupId = group.id,
+            selectedLibraryPaperId = validPaperId,
         )
     }
 
@@ -58,6 +72,13 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setTheme(theme: ThemePreference) {
         context.dataStore.edit { it[Keys.THEME] = theme.name }
+    }
+
+    suspend fun setLibrarySelection(groupId: String, paperId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LIBRARY_GROUP_ID] = groupId
+            prefs[Keys.LIBRARY_PAPER_ID] = paperId
+        }
     }
 
     suspend fun updateScannerSettings(

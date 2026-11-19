@@ -81,9 +81,11 @@ object AppRoutes {
     const val HELP = "help"
     const val CHAPTER_DETAIL = "chapter/{chapterId}"
     const val PDF_PREVIEW = "pdf/{chapterId}"
+    const val PDF_PAPER_PREVIEW = "pdf_paper/{paperId}"
 
     fun chapterDetail(chapterId: String) = "chapter/$chapterId"
     fun pdfPreview(chapterId: String) = "pdf/$chapterId"
+    fun pdfPaperPreview(paperId: String) = "pdf_paper/$paperId"
 }
 
 private data class NavDestinationItem(
@@ -151,8 +153,12 @@ private fun SmartPageLibraryAppContent(
 
     val scannerUiState by scannerViewModel.uiState.collectAsStateWithLifecycle()
     val showSavedOnly by libraryViewModel.showSavedOnly.collectAsStateWithLifecycle()
+    val selectedLibraryGroup by libraryViewModel.selectedGroup.collectAsStateWithLifecycle()
+    val selectedLibraryPaperId by libraryViewModel.selectedPaperId.collectAsStateWithLifecycle()
 
-    val isFullScreenSubRoute = currentRoute.startsWith("chapter/") || currentRoute.startsWith("pdf/")
+    val isFullScreenSubRoute = currentRoute.startsWith("chapter/") ||
+        currentRoute.startsWith("pdf/") ||
+        currentRoute.startsWith("pdf_paper/")
 
     val bottomItems = listOf(
         NavDestinationItem(AppRoutes.DASHBOARD, strings.navDashboard, Icons.Default.Dashboard, "nav_dashboard"),
@@ -316,14 +322,21 @@ private fun SmartPageLibraryAppContent(
                     composable(AppRoutes.LIBRARY) {
                         LibraryScreen(
                             chaptersWithStats = allChapters,
+                            selectedGroup = selectedLibraryGroup,
+                            selectedPaperId = selectedLibraryPaperId,
                             showSavedOnly = showSavedOnly,
                             strings = strings,
+                            onSelectGroup = libraryViewModel::selectGroup,
+                            onSelectPaper = libraryViewModel::selectPaper,
                             onToggleSavedOnly = libraryViewModel::setShowSavedOnly,
                             onOpenChapter = { chapterId ->
                                 navController.navigate(AppRoutes.chapterDetail(chapterId))
                             },
                             onOpenPdfPreview = { chapterId ->
                                 navController.navigate(AppRoutes.pdfPreview(chapterId))
+                            },
+                            onOpenPaperPdfPreview = { paperId ->
+                                navController.navigate(AppRoutes.pdfPaperPreview(paperId))
                             },
                             onRenameChapter = libraryViewModel::renameChapter,
                             onDeleteChapterLinks = libraryViewModel::clearChapterLinks,
@@ -393,6 +406,34 @@ private fun SmartPageLibraryAppContent(
                             strings = strings,
                             onLoadChapter = { id ->
                                 pdfViewModel.loadChapterAndBuildPdf(id, strings.isBangla)
+                            },
+                            onRetryFailed = pdfViewModel::retryFailedPages,
+                            onChangePageSizeMode = pdfViewModel::switchPageSizeMode,
+                            onClose = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(
+                        route = AppRoutes.PDF_PAPER_PREVIEW,
+                        arguments = listOf(navArgument("paperId") { type = NavType.StringType }),
+                    ) { entry ->
+                        val paperId = entry.arguments?.getString("paperId") ?: return@composable
+                        val pdfViewModel: PdfPreviewViewModel = viewModel(
+                            key = "pdf_paper_$paperId",
+                            factory = PdfPreviewViewModel.Factory(container),
+                        )
+                        val pdfState by pdfViewModel.state.collectAsStateWithLifecycle()
+                        val paperTitle by pdfViewModel.chapterDisplayTitle.collectAsStateWithLifecycle()
+                        val pageSizeMode by pdfViewModel.pageSizeMode.collectAsStateWithLifecycle()
+
+                        PdfPreviewScreen(
+                            chapterId = paperId,
+                            chapterTitle = paperTitle,
+                            state = pdfState,
+                            pageSizeMode = pageSizeMode,
+                            strings = strings,
+                            onLoadChapter = { id ->
+                                pdfViewModel.loadPaperAndBuildPdf(id, strings.isBangla)
                             },
                             onRetryFailed = pdfViewModel::retryFailedPages,
                             onChangePageSizeMode = pdfViewModel::switchPageSizeMode,

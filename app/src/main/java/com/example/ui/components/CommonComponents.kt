@@ -442,10 +442,16 @@ fun SelectSubjectChapterModal(
             .entries
             .sortedWith(compareBy({ it.key.first ?: 0 }, { it.key.second ?: 0 }))
     }
+    val distinctBooks = remember(validPages) {
+        validPages.mapNotNull { it.bookNumber }.distinct().sorted()
+    }
     val hasMultipleChapters = remember(discoveredGroups) {
         discoveredGroups.count { it.key.second != null } > 1
     }
 
+    var selectedSourceBook by remember(validPages) {
+        mutableStateOf(distinctBooks.firstOrNull())
+    }
     // Group filter: null = All pages, Pair(book, ch) = specific discovered group
     var selectedSourceGroup by remember(validPages) {
         mutableStateOf<Pair<Int?, Int?>?>(null)
@@ -454,11 +460,14 @@ fun SelectSubjectChapterModal(
         mutableStateOf(hasMultipleChapters)
     }
 
-    val pagesForSave = remember(validPages, selectedSourceGroup, autoMapAllChapters) {
-        if (autoMapAllChapters || selectedSourceGroup == null) {
-            validPages
-        } else {
-            validPages.filter { (it.bookNumber to it.chapterNumber) == selectedSourceGroup }
+    val pagesForSave = remember(validPages, selectedSourceBook, selectedSourceGroup, autoMapAllChapters, distinctBooks) {
+        when {
+            autoMapAllChapters && distinctBooks.size > 1 && selectedSourceBook != null ->
+                validPages.filter { it.bookNumber == selectedSourceBook }
+            autoMapAllChapters || selectedSourceGroup == null ->
+                validPages
+            else ->
+                validPages.filter { (it.bookNumber to it.chapterNumber) == selectedSourceGroup }
         }
     }
 
@@ -525,7 +534,7 @@ fun SelectSubjectChapterModal(
                 ) {
                     // 0. If multiple chapters/books discovered, offer Auto-Map or specific source selection
                     if (hasMultipleChapters) {
-                        val distinctChCount = discoveredGroups.mapNotNull { it.key.second }.distinct().size
+                        val distinctChCount = pagesForSave.mapNotNull { it.chapterNumber }.distinct().size
                         SaveModeOptionRow(
                             selected = autoMapAllChapters,
                             title = strings.autoMapChaptersOptionTitle,
@@ -533,6 +542,27 @@ fun SelectSubjectChapterModal(
                             onClick = { autoMapAllChapters = !autoMapAllChapters },
                             testTag = "save_auto_map_chapters",
                         )
+
+                        if (autoMapAllChapters && distinctBooks.size > 1) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                distinctBooks.forEach { bookNo ->
+                                    val countInBook = validPages.count { it.bookNumber == bookNo }
+                                    FilterChip(
+                                        selected = selectedSourceBook == bookNo,
+                                        onClick = { selectedSourceBook = bookNo },
+                                        label = { Text("${strings.currentBookLabel} $bookNo ($countInBook)") },
+                                    )
+                                }
+                                FilterChip(
+                                    selected = selectedSourceBook == null,
+                                    onClick = { selectedSourceBook = null },
+                                    label = { Text("${strings.filterAllChapters} (${validPages.size})") },
+                                )
+                            }
+                        }
 
                         if (!autoMapAllChapters) {
                             FlowRow(

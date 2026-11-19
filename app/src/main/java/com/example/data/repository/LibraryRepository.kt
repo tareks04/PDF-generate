@@ -28,6 +28,9 @@ class LibraryRepository(private val dao: LibraryDao) {
     suspend fun getLinksForChapterSync(chapterId: String): List<PageLinkEntity> =
         dao.getLinksForChapterSync(chapterId)
 
+    suspend fun getLinksForPaperSerialSync(paperId: String): List<PageLinkEntity> =
+        dao.getLinksForPaperSerialSync(paperId)
+
     suspend fun getChapterByIdSync(chapterId: String): ChapterEntity? =
         dao.getChapterByIdSync(chapterId)
 

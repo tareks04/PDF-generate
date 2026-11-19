@@ -40,8 +40,20 @@ class ImageValidator(
         }
     }
 
-    private fun buildClient(timeoutSeconds: Int, allowLocal: Boolean): OkHttpClient {
-        return OkHttpClient.Builder()
+    private val sharedClient = OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    @Volatile
+    private var cachedClientConfig: Triple<Int, Boolean, OkHttpClient>? = null
+
+    private fun getOrBuildClient(timeoutSeconds: Int, allowLocal: Boolean): OkHttpClient {
+        val current = cachedClientConfig
+        if (current != null && current.first == timeoutSeconds && current.second == allowLocal) {
+            return current.third
+        }
+        val rebuilt = sharedClient.newBuilder()
             .connectTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
             .writeTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
@@ -49,6 +61,8 @@ class ImageValidator(
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
+        cachedClientConfig = Triple(timeoutSeconds, allowLocal, rebuilt)
+        return rebuilt
     }
 
     suspend fun validateAndFetchImage(
@@ -80,7 +94,7 @@ class ImageValidator(
             targetUrl
         }
 
-        val client = buildClient(timeoutSecondsProvider(), allowLocal)
+        val client = getOrBuildClient(timeoutSecondsProvider(), allowLocal)
         val request = Request.Builder()
             .url(effectiveUrl)
             .get()

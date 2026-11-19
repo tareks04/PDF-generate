@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -30,6 +32,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
@@ -113,6 +116,28 @@ fun PdfPreviewScreen(
 
     val readyState = state as? PdfWorkflowState.Ready
 
+    val savePdfLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { uri ->
+        val ready = readyState ?: return@rememberLauncherForActivityResult
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val savedOk = withContext(Dispatchers.IO) {
+                runCatching {
+                    val srcFile = File(ready.pdfFilePath)
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        srcFile.inputStream().use { input ->
+                            input.copyTo(out)
+                        }
+                    } ?: error("Cannot open output stream")
+                }.isSuccess
+            }
+            snackbarHostState.showSnackbar(
+                if (savedOk) strings.pdfSavedToFileSuccess else strings.pdfSavedToFileFailed
+            )
+        }
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -148,7 +173,41 @@ fun PdfPreviewScreen(
                     }
                 },
                 actions = {
-                    if (readyState != null) {
+                    IconButton(
+                        onClick = onClose,
+                        modifier = Modifier.minimumInteractiveComponentSize(),
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = strings.closePreviewButton)
+                    }
+                },
+            )
+        },
+        bottomBar = {
+            if (readyState != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 4.dp,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            onClick = { savePdfLauncher.launch(readyState.pdfFileName) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("pdf_save_file_button"),
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.savePdfFileButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         Button(
                             onClick = {
                                 val file = File(readyState.pdfFilePath)
@@ -164,23 +223,17 @@ fun PdfPreviewScreen(
                                 }
                             },
                             modifier = Modifier
-                                .padding(end = 4.dp)
+                                .weight(1.3f)
                                 .minimumInteractiveComponentSize()
                                 .testTag("pdf_print_button"),
                         ) {
                             Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(strings.printSavePdfButton)
+                            Text(strings.printSavePdfButton, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    IconButton(
-                        onClick = onClose,
-                        modifier = Modifier.minimumInteractiveComponentSize(),
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = strings.closePreviewButton)
-                    }
-                },
-            )
+                }
+            }
         },
     ) { innerPadding ->
         Box(

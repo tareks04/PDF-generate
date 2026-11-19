@@ -62,27 +62,42 @@ import java.util.Date
 @Composable
 fun LibraryScreen(
     chaptersWithStats: List<ChapterWithStats>,
+    selectedGroup: SubjectGroup,
+    selectedPaperId: String,
     showSavedOnly: Boolean,
     strings: AppStrings,
+    onSelectGroup: (SubjectGroup) -> Unit,
+    onSelectPaper: (String) -> Unit,
     onToggleSavedOnly: (Boolean) -> Unit,
     onOpenChapter: (String) -> Unit,
     onOpenPdfPreview: (String) -> Unit,
+    onOpenPaperPdfPreview: (String) -> Unit,
     onRenameChapter: (chapterId: String, newTitle: String?) -> Unit,
     onDeleteChapterLinks: (chapterId: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var selectedGroup by remember { mutableStateOf(SubjectGroup.PHYSICS) }
     val papers = remember(selectedGroup) { SubjectCatalog.papersForGroup(selectedGroup) }
-    var selectedPaperId by remember(selectedGroup) { mutableStateOf(papers.first().id) }
+    val activePaper = remember(selectedPaperId, papers) {
+        papers.find { it.id == selectedPaperId } ?: papers.first()
+    }
 
     var renameTarget by remember { mutableStateOf<ChapterWithStats?>(null) }
     var deleteTarget by remember { mutableStateOf<ChapterWithStats?>(null) }
 
-    val filteredChapters = remember(chaptersWithStats, selectedPaperId, showSavedOnly) {
+    val allChaptersInPaper = remember(chaptersWithStats, activePaper.id) {
         chaptersWithStats
-            .filter { it.paperId == selectedPaperId }
-            .filter { !showSavedOnly || it.pageCount > 0 }
+            .filter { it.paperId == activePaper.id }
             .sortedBy { it.chapterNumber }
+    }
+    val populatedChaptersCount = remember(allChaptersInPaper) {
+        allChaptersInPaper.count { it.pageCount > 0 }
+    }
+    val totalPaperPagesCount = remember(allChaptersInPaper) {
+        allChaptersInPaper.sumOf { it.pageCount }
+    }
+
+    val filteredChapters = remember(allChaptersInPaper, showSavedOnly) {
+        allChaptersInPaper.filter { !showSavedOnly || it.pageCount > 0 }
     }
 
     Box(
@@ -99,10 +114,7 @@ fun LibraryScreen(
                 SubjectGroup.entries.forEach { group ->
                     Tab(
                         selected = selectedGroup == group,
-                        onClick = {
-                            selectedGroup = group
-                            selectedPaperId = SubjectCatalog.papersForGroup(group).first().id
-                        },
+                        onClick = { onSelectGroup(group) },
                         text = { Text(group.title(strings.isBangla)) },
                         modifier = Modifier.testTag("library_tab_${group.id}"),
                     )
@@ -124,8 +136,8 @@ fun LibraryScreen(
                 ) {
                     papers.forEach { paper ->
                         FilterChip(
-                            selected = selectedPaperId == paper.id,
-                            onClick = { selectedPaperId = paper.id },
+                            selected = activePaper.id == paper.id,
+                            onClick = { onSelectPaper(paper.id) },
                             label = { Text(paper.title(strings.isBangla)) },
                             modifier = Modifier.testTag("library_paper_${paper.id}"),
                         )
@@ -139,6 +151,50 @@ fun LibraryScreen(
                     label = { Text(if (showSavedOnly) strings.filterSavedOnly else strings.filterAllChapters) },
                     modifier = Modifier.testTag("library_filter_saved_chip"),
                 )
+            }
+
+            // Full-Paper Serial PDF Banner (Download / Print all chapters of active paper serially in one PDF)
+            if (totalPaperPagesCount > 0) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = activePaper.title(strings.isBangla),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = strings.allPaperPdfSummary(populatedChaptersCount, totalPaperPagesCount),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Button(
+                            onClick = { onOpenPaperPdfPreview(activePaper.id) },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("library_download_all_paper_pdf"),
+                        ) {
+                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.downloadAllPaperPdfButton)
+                        }
+                    }
+                }
             }
 
             // Chapter Cards List

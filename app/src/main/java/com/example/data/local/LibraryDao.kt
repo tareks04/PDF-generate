@@ -71,6 +71,16 @@ interface LibraryDao {
     @Query("SELECT * FROM page_links WHERE chapterId = :chapterId ORDER BY pageNumber ASC, id ASC")
     suspend fun getLinksForChapterSync(chapterId: String): List<PageLinkEntity>
 
+    @Query(
+        """
+        SELECT p.* FROM page_links p
+        INNER JOIN chapters c ON p.chapterId = c.chapterId
+        WHERE c.paperId = :paperId
+        ORDER BY c.chapterNumber ASC, p.pageNumber ASC, p.id ASC
+        """
+    )
+    suspend fun getLinksForPaperSerialSync(paperId: String): List<PageLinkEntity>
+
     @Query("SELECT * FROM page_links ORDER BY chapterId ASC, pageNumber ASC, id ASC")
     suspend fun getAllLinksSync(): List<PageLinkEntity>
 

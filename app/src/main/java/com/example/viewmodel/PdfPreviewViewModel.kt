@@ -27,17 +27,18 @@ class PdfPreviewViewModel(private val container: AppContainer) : ViewModel() {
     private val _pageSizeMode = MutableStateFlow(PdfPageSizeMode.A4_FIT)
     val pageSizeMode: StateFlow<PdfPageSizeMode> = _pageSizeMode.asStateFlow()
 
-    private var currentChapterId: String = ""
+    private var currentTargetKey: String = ""
     private var currentLinks: List<PageLinkEntity> = emptyList()
     private val verifiedCache = mutableMapOf<Long, VerifiedPageFile>()
     private var outputFileName: String = "SmartPageLibrary.pdf"
     private var activeJob: Job? = null
 
     fun loadChapterAndBuildPdf(chapterId: String, isBangla: Boolean) {
-        if (currentChapterId == chapterId && _state.value is PdfWorkflowState.Ready) {
+        val key = "chapter:$chapterId"
+        if (currentTargetKey == key && _state.value is PdfWorkflowState.Ready) {
             return
         }
-        currentChapterId = chapterId
+        currentTargetKey = key
         verifiedCache.clear()
         activeJob?.cancel()
 
@@ -61,6 +62,38 @@ class PdfPreviewViewModel(private val container: AppContainer) : ViewModel() {
             } else {
                 _chapterDisplayTitle.value = chapterId
                 outputFileName = "SmartPageLibrary.pdf"
+            }
+
+            if (links.isEmpty()) {
+                _state.value = PdfWorkflowState.Error("NO_LINKS")
+                return@launch
+            }
+
+            fetchAndBuild()
+        }
+    }
+
+    fun loadPaperAndBuildPdf(paperId: String, isBangla: Boolean) {
+        val key = "paper:$paperId"
+        if (currentTargetKey == key && _state.value is PdfWorkflowState.Ready) {
+            return
+        }
+        currentTargetKey = key
+        verifiedCache.clear()
+        activeJob?.cancel()
+
+        activeJob = viewModelScope.launch {
+            val paper = SubjectCatalog.paperById(paperId)
+            val links = container.libraryRepository.getLinksForPaperSerialSync(paperId)
+            currentLinks = links
+
+            if (paper != null) {
+                val suffix = if (isBangla) "সব অধ্যায় (ধারাবাহিক)" else "All Chapters (Serial)"
+                _chapterDisplayTitle.value = "${paper.title(isBangla)} — $suffix"
+                outputFileName = PdfGenerator.buildSafePaperPdfFilename(paper.titleEn)
+            } else {
+                _chapterDisplayTitle.value = paperId
+                outputFileName = "SmartPageLibrary_All_Chapters.pdf"
             }
 
             if (links.isEmpty()) {
@@ -102,6 +135,7 @@ class PdfPreviewViewModel(private val container: AppContainer) : ViewModel() {
         val batchResult = container.pdfGenerator.fetchAndVerifyAllPages(
             links = currentLinks,
             existingVerified = verifiedCache,
+            preserveInputOrder = true,
             onProgress = { done, totalCount, pageLabel ->
                 _state.value = PdfWorkflowState.FetchingImages(
                     completed = done,
@@ -135,6 +169,7 @@ class PdfPreviewViewModel(private val container: AppContainer) : ViewModel() {
                 verifiedPages = orderedVerified,
                 outputFileName = outputFileName,
                 mode = _pageSizeMode.value,
+                preserveInputOrder = true,
                 onProgress = { done, totalCount ->
                     _state.value = PdfWorkflowState.GeneratingPdf(
                         processedPages = done,

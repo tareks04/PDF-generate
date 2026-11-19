@@ -114,6 +114,14 @@ class PdfGenerator(
             return "$sanitized.pdf"
         }
 
+        fun buildSafePaperPdfFilename(paperTitleEn: String): String {
+            val sanitized = "${paperTitleEn}_All_Chapters"
+                .replace(Regex("""[^A-Za-z0-9._-]+"""), "_")
+                .trim('_')
+                .ifEmpty { "SmartPageLibrary_All_Chapters" }
+            return "$sanitized.pdf"
+        }
+
         fun calculateAspectFitRect(
             imageWidth: Int,
             imageHeight: Int,
@@ -135,17 +143,23 @@ class PdfGenerator(
     suspend fun fetchAndVerifyAllPages(
         links: List<PageLinkEntity>,
         existingVerified: Map<Long, VerifiedPageFile>,
+        preserveInputOrder: Boolean = false,
         onProgress: (completed: Int, total: Int, currentLabel: String) -> Unit,
     ): BatchFetchResult = withContext(Dispatchers.IO) {
         if (!pageCacheDir.exists()) pageCacheDir.mkdirs()
 
-        val sortedLinks = links.sortedWith(compareBy({ it.pageNumber }, { it.id }))
-        val total = sortedLinks.size
+        val orderedLinks = if (preserveInputOrder) {
+            links
+        } else {
+            links.sortedWith(compareBy({ it.pageNumber }, { it.id }))
+        }
+        val orderById = orderedLinks.mapIndexed { idx, link -> link.id to idx }.toMap()
+        val total = orderedLinks.size
         val semaphore = Semaphore(3)
         val completedCounter = AtomicInteger(0)
 
         val results = coroutineScope {
-            sortedLinks.map { link ->
+            orderedLinks.map { link ->
                 async {
                     val already = existingVerified[link.id]
                     if (already != null && already.file.exists() && already.file.length() > 0) {
@@ -206,7 +220,7 @@ class PdfGenerator(
         }
 
         BatchFetchResult(
-            verifiedPages = verified.sortedWith(compareBy({ it.link.pageNumber }, { it.link.id })),
+            verifiedPages = verified.sortedBy { orderById[it.link.id] ?: Int.MAX_VALUE },
             failures = failures.sortedBy { it.pageNumber },
         )
     }
@@ -215,12 +229,17 @@ class PdfGenerator(
         verifiedPages: List<VerifiedPageFile>,
         outputFileName: String,
         mode: PdfPageSizeMode,
+        preserveInputOrder: Boolean = false,
         onProgress: (processed: Int, total: Int) -> Unit,
     ): File = withContext(Dispatchers.Default) {
         if (!pdfCacheDir.exists()) pdfCacheDir.mkdirs()
         val outputFile = File(pdfCacheDir, outputFileName)
 
-        val sorted = verifiedPages.sortedWith(compareBy({ it.link.pageNumber }, { it.link.id }))
+        val sorted = if (preserveInputOrder) {
+            verifiedPages
+        } else {
+            verifiedPages.sortedWith(compareBy({ it.link.pageNumber }, { it.link.id }))
+        }
         val specs = sorted.mapIndexed { index, page ->
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(page.file.absolutePath, bounds)

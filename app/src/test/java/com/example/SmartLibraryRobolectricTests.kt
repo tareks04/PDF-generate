@@ -7,7 +7,9 @@ import android.graphics.pdf.PdfRenderer
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -39,6 +41,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -422,23 +425,26 @@ class SmartLibraryRobolectricTests {
         }
     }
 
-    // --- 5. CASCADE SCANNER (PAGE -> CH+1 -> BOOK+1 -> STOP ON INVALID BOOK) ---
+    // --- 5. SINGLE-BOOK CHAPTER CASCADE (STOP AT END OF BOOK, NEVER ADVANCE BOOK+1) ---
 
     @Test
-    fun `scanner viewmodel cascades from missing page to next chapter at same page then next book and stops at invalid book`() {
+    fun `scanner viewmodel advances chapters inside one book and stops without touching book+1 even if book+1 exists`() {
         val jpegBytes = createSampleJpegBytes(100, 140, Color.DKGRAY)
         val validPaths = setOf(
-            "/bangla-ai/assets/book-478/pages/ch1_p1.jpg",
-            "/bangla-ai/assets/book-478/pages/ch1_p2.jpg",
-            "/bangla-ai/assets/book-478/pages/ch1_p3.jpg",
-            "/bangla-ai/assets/book-478/pages/ch2_p4.jpg",
-            "/bangla-ai/assets/book-478/pages/ch2_p5.jpg",
-            "/bangla-ai/assets/book-479/pages/ch1_p1.jpg",
-            "/bangla-ai/assets/book-479/pages/ch1_p2.jpg",
+            "/bangla-ai/assets/book-480/pages/ch1_p1.jpg",
+            "/bangla-ai/assets/book-480/pages/ch1_p2.jpg",
+            "/bangla-ai/assets/book-480/pages/ch1_p3.jpg",
+            "/bangla-ai/assets/book-480/pages/ch2_p4.jpg",
+            "/bangla-ai/assets/book-480/pages/ch2_p5.jpg",
+            "/bangla-ai/assets/book-480/pages/ch3_p6.jpg",
+            // book-481 exists on server, but scanner MUST stop at end of book-480 and never request book-481
+            "/bangla-ai/assets/book-481/pages/ch1_p1.jpg",
         )
+        val requestedPaths = java.util.Collections.synchronizedList(mutableListOf<String>())
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/bangla-ai/assets/") { ex ->
             val reqPath = ex.requestURI.path
+            requestedPaths.add(reqPath)
             if (reqPath in validPaths) {
                 ex.responseHeaders.add("Content-Type", "image/jpeg")
                 ex.sendResponseHeaders(200, jpegBytes.size.toLong())
@@ -460,7 +466,7 @@ class SmartLibraryRobolectricTests {
             runBlocking { container.libraryRepository.ensureSeeded() }
 
             val vm = ScannerViewModel(container)
-            vm.onUrlInputChange("http://127.0.0.1:$port/bangla-ai/assets/book-478/pages/ch1_p1.jpg")
+            vm.onUrlInputChange("http://127.0.0.1:$port/bangla-ai/assets/book-480/pages/ch1_p1.jpg")
             assertTrue(vm.uiState.value.detectedHasChapterOrBook)
 
             vm.startScan()
@@ -473,48 +479,204 @@ class SmartLibraryRobolectricTests {
 
             val finalState = vm.uiState.value
             assertEquals(
-                "Expected COMPLETED, got ${finalState.runState} (pause=${finalState.pauseReasonStatus}, detail=${finalState.pauseReasonDetail}, results=${finalState.results.size})",
+                "Expected COMPLETED, got ${finalState.runState} (pause=${finalState.pauseReasonStatus}, detail=${finalState.pauseReasonDetail})",
                 ScannerRunState.COMPLETED,
                 finalState.runState,
             )
-            assertEquals(480, finalState.stoppedAtInvalidBook)
+            assertNull(finalState.stoppedAtInvalidBook)
+            assertEquals(4, finalState.stoppedAtInvalidChapter)
+            assertTrue("Must never request book-481", requestedPaths.none { it.contains("book-481") })
+
             val validTriples = finalState.validResults.map {
                 Triple(it.bookNumber, it.chapterNumber, it.pageNumber)
             }
             assertEquals(
                 listOf(
-                    Triple(478, 1, 1),
-                    Triple(478, 1, 2),
-                    Triple(478, 1, 3),
-                    Triple(478, 2, 4),
-                    Triple(478, 2, 5),
-                    Triple(479, 1, 1),
-                    Triple(479, 1, 2),
+                    Triple(480, 1, 1),
+                    Triple(480, 1, 2),
+                    Triple(480, 1, 3),
+                    Triple(480, 2, 4),
+                    Triple(480, 2, 5),
+                    Triple(480, 3, 6),
                 ),
                 validTriples,
             )
 
-            // Verify auto-map saving book 478 chapters into chemistry_1
-            val book478Valid = finalState.validResults.filter { it.bookNumber == 478 }
+            // Verify auto-map saving book 480 chapters into chemistry_1
             runBlocking {
-                val saveRes = vm.saveDiscoveredChaptersToPaper("chemistry_1", book478Valid, SaveMode.REPLACE)
-                assertEquals(2, saveRes.chaptersUpdated)
-                assertEquals(5, saveRes.totalAdded)
-                val ch1Links = container.libraryRepository.getLinksForChapterSync(
-                    SubjectCatalog.chapterId("chemistry_1", 1),
+                val saveRes = vm.saveDiscoveredChaptersToPaper("chemistry_1", finalState.validResults, SaveMode.REPLACE)
+                assertEquals(3, saveRes.chaptersUpdated)
+                assertEquals(6, saveRes.totalAdded)
+                assertEquals(
+                    listOf(1, 2, 3),
+                    container.libraryRepository.getLinksForChapterSync(SubjectCatalog.chapterId("chemistry_1", 1)).map { it.pageNumber },
                 )
-                val ch2Links = container.libraryRepository.getLinksForChapterSync(
-                    SubjectCatalog.chapterId("chemistry_1", 2),
+                assertEquals(
+                    listOf(4, 5),
+                    container.libraryRepository.getLinksForChapterSync(SubjectCatalog.chapterId("chemistry_1", 2)).map { it.pageNumber },
                 )
-                assertEquals(listOf(1, 2, 3), ch1Links.map { it.pageNumber })
-                assertEquals(listOf(4, 5), ch2Links.map { it.pageNumber })
+                assertEquals(
+                    listOf(6),
+                    container.libraryRepository.getLinksForChapterSync(SubjectCatalog.chapterId("chemistry_1", 3)).map { it.pageNumber },
+                )
             }
         } finally {
             server.stop(0)
         }
     }
 
-    // --- 6. COMPOSE UI BILINGUAL TOGGLE TEST ---
+    // --- 6. FULL-PAPER SERIAL CHAPTER-WISE COMBINED PDF TEST ---
+
+    @Test
+    fun `paper serial pdf combines all chapters top to bottom in exact chapter and page order`() = runBlocking {
+        val jpegBytes = createSampleJpegBytes(200, 300, Color.MAGENTA)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/bot/") { ex ->
+            ex.responseHeaders.add("Content-Type", "image/jpeg")
+            ex.sendResponseHeaders(200, jpegBytes.size.toLong())
+            ex.responseBody.use { it.write(jpegBytes) }
+        }
+        server.start()
+
+        try {
+            val port = server.address.port
+            repository.ensureSeeded()
+            // Intentionally insert Chapter 3 BEFORE Chapter 1 and Chapter 2 so SQL/PDF ordering must honor chapterNumber ASC
+            repository.saveScannedPagesToChapter(
+                SubjectCatalog.chapterId("botany", 3),
+                listOf(
+                    ScannedPageResult(1, "001", "http://127.0.0.1:$port/bot/c3_p1.jpg", PageScanStatus.VALID),
+                    ScannedPageResult(2, "002", "http://127.0.0.1:$port/bot/c3_p2.jpg", PageScanStatus.VALID),
+                ),
+                SaveMode.REPLACE,
+            )
+            repository.saveScannedPagesToChapter(
+                SubjectCatalog.chapterId("botany", 1),
+                listOf(
+                    ScannedPageResult(10, "010", "http://127.0.0.1:$port/bot/c1_p10.jpg", PageScanStatus.VALID),
+                    ScannedPageResult(11, "011", "http://127.0.0.1:$port/bot/c1_p11.jpg", PageScanStatus.VALID),
+                ),
+                SaveMode.REPLACE,
+            )
+            repository.saveScannedPagesToChapter(
+                SubjectCatalog.chapterId("botany", 2),
+                listOf(
+                    ScannedPageResult(5, "005", "http://127.0.0.1:$port/bot/c2_p5.jpg", PageScanStatus.VALID),
+                ),
+                SaveMode.REPLACE,
+            )
+
+            val serialLinks = repository.getLinksForPaperSerialSync("botany")
+            assertEquals(
+                listOf(
+                    "botany_ch_1:10",
+                    "botany_ch_1:11",
+                    "botany_ch_2:5",
+                    "botany_ch_3:1",
+                    "botany_ch_3:2",
+                ),
+                serialLinks.map { "${it.chapterId}:${it.pageNumber}" },
+            )
+
+            val writtenOrder = mutableListOf<String>()
+            val testPdfWriter = object : com.example.pdf.PdfWriter {
+                override fun writePdf(
+                    pages: List<com.example.pdf.PdfPageSpec>,
+                    outputFile: File,
+                    onProgress: (Int, Int) -> Unit,
+                ) {
+                    pages.forEach { writtenOrder.add(it.imageFile.name) }
+                    outputFile.writeText("%PDF-1.4\n%BotanySerial\n")
+                    onProgress(pages.size, pages.size)
+                }
+            }
+            val validator = ImageValidator(
+                previewCacheDir = File(tempDir, "bot_previews"),
+                allowLocalServersProvider = { true },
+            )
+            val pdfGen = PdfGenerator(
+                imageValidator = validator,
+                pdfCacheDir = File(tempDir, "bot_pdfs"),
+                pageCacheDir = File(tempDir, "bot_pages"),
+                pdfWriter = testPdfWriter,
+            )
+
+            val batch = pdfGen.fetchAndVerifyAllPages(
+                links = serialLinks,
+                existingVerified = emptyMap(),
+                preserveInputOrder = true,
+            ) { _, _, _ -> }
+            assertEquals(5, batch.verifiedPages.size)
+            assertEquals(
+                listOf(10, 11, 5, 1, 2),
+                batch.verifiedPages.map { it.link.pageNumber },
+            )
+
+            val file = pdfGen.generatePdf(
+                verifiedPages = batch.verifiedPages,
+                outputFileName = PdfGenerator.buildSafePaperPdfFilename("Botany"),
+                mode = PdfPageSizeMode.A4_FIT,
+                preserveInputOrder = true,
+            ) { _, _ -> }
+            assertEquals("Botany_All_Chapters.pdf", file.name)
+            assertEquals(5, writtenOrder.size)
+            assertTrue(writtenOrder[0].contains("botany_ch_1") && writtenOrder[0].endsWith("_10.jpg"))
+            assertTrue(writtenOrder[1].contains("botany_ch_1") && writtenOrder[1].endsWith("_11.jpg"))
+            assertTrue(writtenOrder[2].contains("botany_ch_2") && writtenOrder[2].endsWith("_5.jpg"))
+            assertTrue(writtenOrder[3].contains("botany_ch_3") && writtenOrder[3].endsWith("_1.jpg"))
+            assertTrue(writtenOrder[4].contains("botany_ch_3") && writtenOrder[4].endsWith("_2.jpg"))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    // --- 7. COMPOSE UI TESTS: BILINGUAL TOGGLE & LIBRARY SELECTION PERSISTENCE ---
+
+    @Test
+    fun `library preserves selected chemistry subject and paper after navigating to pdf preview and returning`() {
+        composeRule.waitForIdle()
+        val appContainer = (composeRule.activity.application as SmartLibraryApp).container
+        runBlocking {
+            appContainer.libraryRepository.ensureSeeded()
+            appContainer.libraryRepository.saveScannedPagesToChapter(
+                SubjectCatalog.chapterId("chemistry_2", 1),
+                listOf(ScannedPageResult(1, "001", "https://example.com/chem2/001.jpg", PageScanStatus.VALID)),
+                SaveMode.REPLACE,
+            )
+        }
+
+        // Open Library tab
+        composeRule.onNodeWithTag("nav_library").performClick()
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithTag("library_tab_chemistry").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Select Chemistry -> Chemistry 2nd Paper
+        composeRule.onNodeWithTag("library_tab_chemistry").performClick()
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithTag("library_paper_chemistry_2").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("library_paper_chemistry_2").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("library_paper_chemistry_2").assertIsSelected()
+
+        // Open PDF / Print preview (full paper or chapter)
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithTag("library_download_all_paper_pdf").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("library_download_all_paper_pdf").performClick()
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithTag("pdf_back_button").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Return to Library and assert Chemistry + Chemistry 2nd Paper remain selected!
+        composeRule.onNodeWithTag("pdf_back_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithTag("library_tab_chemistry").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("library_tab_chemistry").assertIsSelected()
+        composeRule.onNodeWithTag("library_paper_chemistry_2").assertIsSelected()
+    }
 
     @Test
     fun `ui defaults to bangla and toggles to english via B E button`() {
